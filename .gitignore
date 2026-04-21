@@ -2,6 +2,9 @@
 .venv/
 __pycache__/
 *.pyc
+output/
+pipeline.log
+summary.json
 # state/watermark.json  — uncomment to exclude if you don't want it committed
 # (keeping it tracked gives us a persistent fallback across GitHub Action runs)
 .DS_Store

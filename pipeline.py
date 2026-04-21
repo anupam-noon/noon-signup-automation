@@ -287,11 +287,14 @@ def main() -> None:
         return
 
     # ---- 6. upload to HubSpot ----
-    actionable = [r for r in new_rows if r["_verdict"] in ("Green", "Yellow")]
-    if cfg.limit_upload and len(actionable) > cfg.limit_upload:
+    actionable_all = [r for r in new_rows if r["_verdict"] in ("Green", "Yellow")]
+    actionable = actionable_all
+    capped_off: list[dict] = []  # rows skipped by limit_upload — do NOT mark as seen
+    if cfg.limit_upload and len(actionable_all) > cfg.limit_upload:
         print(f"LIMIT_UPLOAD={cfg.limit_upload}: capping upload "
-              f"(would have been {len(actionable)})")
-        actionable = actionable[:cfg.limit_upload]
+              f"(would have been {len(actionable_all)})")
+        actionable = actionable_all[:cfg.limit_upload]
+        capped_off = actionable_all[cfg.limit_upload:]
     batch = today_batch_label()
     hubspot_result = {"created": 0, "updated": 0, "skipped": 0, "errors": 0, "dry_run": cfg.dry_run}
     if actionable:
@@ -318,10 +321,16 @@ def main() -> None:
     if cfg.dry_run:
         print("DRY_RUN: watermark NOT advanced")
     else:
+        # Mark all processed rows as seen EXCEPT the Greens/Yellows we
+        # deliberately skipped via LIMIT_UPLOAD — those should get a real
+        # shot at upload on the next run.
+        capped_emails = {r["email"].lower() for r in capped_off}
         for r in new_rows:
-            seen.add(r["email"].lower())
+            if r["email"].lower() not in capped_emails:
+                seen.add(r["email"].lower())
         save_watermark(seen)
-        print(f"watermark saved ({len(seen)} total seen emails)")
+        print(f"watermark saved ({len(seen)} total seen emails; "
+              f"{len(capped_emails)} held back for next run)")
 
     # ---- done ----
     write_summary(

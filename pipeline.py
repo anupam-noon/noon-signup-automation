@@ -85,6 +85,14 @@ def sanity_check(rows: list[dict]) -> list[str]:
     if n == 0:
         return failures
 
+    # Small-sample guards: all three invariants are population statistics
+    # that only make sense at scale. On a quiet day (e.g. N=5, all Greens),
+    # hitting 0% red or 0% trusted-green is plausible noise, not a real
+    # signal. Skip below these floors; still print what we saw.
+    # Trusted-country floor is smaller because trusted is always a subset.
+    SMALL_SAMPLE_FLOOR = 50            # for overall red share
+    TRUSTED_SAMPLE_FLOOR = 20          # for trusted-country green rate
+
     # ---- Invariant 1: trusted-country green rate ----
     trusted = [
         r for r in rows
@@ -97,7 +105,13 @@ def sanity_check(rows: list[dict]) -> list[str]:
             f"sanity: trusted-country green rate = "
             f"{green_trusted}/{len(trusted)} ({rate:.1%})"
         )
-        if rate < 0.15:
+        if len(trusted) < TRUSTED_SAMPLE_FLOOR:
+            print(
+                f"sanity: trusted sample too small "
+                f"(n={len(trusted)} < {TRUSTED_SAMPLE_FLOOR}) — "
+                f"skipping trusted-country green-rate check"
+            )
+        elif rate < 0.15:
             failures.append(
                 f"trusted-country green rate is {rate:.1%} "
                 f"({green_trusted}/{len(trusted)}); expected ≥15% "
@@ -120,16 +134,22 @@ def sanity_check(rows: list[dict]) -> list[str]:
     reds = sum(1 for r in rows if r["_verdict"] == "Red")
     red_share = reds / n
     print(f"sanity: overall red share = {reds}/{n} ({red_share:.1%})")
-    if red_share < 0.20:
-        failures.append(
-            f"overall red share is {red_share:.1%}; expected ≥20%. "
-            f"Bot detection may not be firing."
+    if n < SMALL_SAMPLE_FLOOR:
+        print(
+            f"sanity: sample too small (n={n} < {SMALL_SAMPLE_FLOOR}) — "
+            f"skipping red-share population checks"
         )
-    if red_share > 0.95:
-        failures.append(
-            f"overall red share is {red_share:.1%}; expected ≤95%. "
-            f"Over-flagging — check enrichment + M4/M5/M7 thresholds."
-        )
+    else:
+        if red_share < 0.20:
+            failures.append(
+                f"overall red share is {red_share:.1%}; expected ≥20%. "
+                f"Bot detection may not be firing."
+            )
+        if red_share > 0.95:
+            failures.append(
+                f"overall red share is {red_share:.1%}; expected ≤95%. "
+                f"Over-flagging — check enrichment + M4/M5/M7 thresholds."
+            )
 
     return failures
 

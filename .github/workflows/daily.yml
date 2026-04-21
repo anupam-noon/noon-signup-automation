@@ -2,8 +2,14 @@ name: Daily signup pipeline
 
 on:
   schedule:
-    # 8 PM IST = 14:30 UTC
-    - cron: "30 14 * * *"
+    # 8 PM IST primary. GitHub can delay/skip scheduled runs at peak load,
+    # so we add 30-min and 60-min backup slots. Because the pipeline is
+    # watermark-driven, backup runs are idempotent: if the primary
+    # succeeded the backup sees 0 new rows and exits via the no_new_rows
+    # stage (fast, no HubSpot writes, no Slack spam).
+    - cron: "30 14 * * *"   # 8:00 PM IST (primary)
+    - cron: "00 15 * * *"   # 8:30 PM IST (backup 1)
+    - cron: "30 15 * * *"   # 9:00 PM IST (backup 2)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -106,6 +112,12 @@ jobs:
                   lines.append(f"*HubSpot result:* created={hs.get('created',0)} updated={hs.get('updated',0)} errors={hs.get('errors',0)}" + (" _(dry run)_" if hs.get("dry_run") else ""))
               body_text = "\n".join(lines)
           elif status == "ok":
+              # Stay silent on no-op runs from the backup cron slots.
+              # Only notify if this was a manual dispatch (user wants feedback)
+              # or if something other than "no new rows" triggered the early exit.
+              if s.get("stage") == "no_new_rows" and os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+                  print("no-op scheduled run; skipping Slack notification")
+                  raise SystemExit(0)
               emoji = ":white_check_mark:"
               header = f"*Signup pipeline: nothing to do* (stage={s.get('stage')})"
               body_text = f"Sheet total: {s.get('total_sheet',0):,}, new: {s.get('new',0)}"

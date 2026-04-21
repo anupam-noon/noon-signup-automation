@@ -288,6 +288,10 @@ def main() -> None:
 
     # ---- 6. upload to HubSpot ----
     actionable = [r for r in new_rows if r["_verdict"] in ("Green", "Yellow")]
+    if cfg.limit_upload and len(actionable) > cfg.limit_upload:
+        print(f"LIMIT_UPLOAD={cfg.limit_upload}: capping upload "
+              f"(would have been {len(actionable)})")
+        actionable = actionable[:cfg.limit_upload]
     batch = today_batch_label()
     hubspot_result = {"created": 0, "updated": 0, "skipped": 0, "errors": 0, "dry_run": cfg.dry_run}
     if actionable:

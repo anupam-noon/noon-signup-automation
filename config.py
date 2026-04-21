@@ -15,6 +15,7 @@ class Config:
     posthog_project_id: str
     hubspot_token: str
     dry_run: bool
+    limit_upload: int  # 0 = no limit
 
 
 def _require(name: str) -> str:
@@ -32,4 +33,5 @@ cfg = Config(
     posthog_project_id=_require("POSTHOG_PROJECT_ID"),
     hubspot_token=_require("HUBSPOT_TOKEN"),
     dry_run=os.getenv("DRY_RUN", "") in ("1", "true", "True", "yes"),
+    limit_upload=int(os.getenv("LIMIT_UPLOAD", "0") or "0"),
 )

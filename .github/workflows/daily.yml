@@ -1,0 +1,130 @@
+name: Daily signup pipeline
+
+on:
+  schedule:
+    # 8 PM IST = 14:30 UTC
+    - cron: "30 14 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (don't upload to HubSpot, don't advance watermark)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python tests/test_rules.py
+
+      - name: Restore watermark
+        uses: actions/cache@v4
+        with:
+          path: state/watermark.json
+          key: watermark-${{ github.run_id }}
+          restore-keys: |
+            watermark-
+
+      - name: Run pipeline
+        id: pipeline
+        env:
+          SHEETS_WEBHOOK_URL:    ${{ secrets.SHEETS_WEBHOOK_URL }}
+          SHEETS_WEBHOOK_SECRET: ${{ secrets.SHEETS_WEBHOOK_SECRET }}
+          POSTHOG_HOST:          https://us.posthog.com
+          POSTHOG_TOKEN:         ${{ secrets.POSTHOG_TOKEN }}
+          POSTHOG_PROJECT_ID:    ${{ secrets.POSTHOG_PROJECT_ID }}
+          HUBSPOT_TOKEN:         ${{ secrets.HUBSPOT_TOKEN }}
+          DRY_RUN:               ${{ inputs.dry_run == 'true' && '1' || '' }}
+        run: python pipeline.py 2>&1 | tee pipeline.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-output-${{ github.run_id }}
+          path: |
+            output/*.csv
+            pipeline.log
+            summary.json
+          retention-days: 30
+
+      - name: Slack notify
+        if: always()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request, pathlib
+
+          run_url = os.environ["RUN_URL"]
+          job_status = os.environ["JOB_STATUS"]  # success | failure | cancelled
+
+          # Prefer the pipeline's own summary.json; fall back to log tail if missing.
+          s = {}
+          p = pathlib.Path("summary.json")
+          if p.exists():
+              s = json.loads(p.read_text())
+
+          status = s.get("status", "failed" if job_status != "success" else "ok")
+
+          if status == "ok" and s.get("stage") == "done":
+              emoji = ":white_check_mark:"
+              header = "*Signup pipeline ran OK*"
+              lines = [
+                  f"*Sheet total:* {s.get('total_sheet', '?'):,}",
+                  f"*New since last run:* {s.get('new', '?'):,}",
+                  f"*PostHog enriched:* {s.get('enriched', '?'):,}/{s.get('new', '?'):,}",
+                  f"*Scored:* :large_green_circle: {s.get('green', 0)}  :large_yellow_circle: {s.get('yellow', 0)}  :red_circle: {s.get('red', 0)}",
+                  f"*Uploaded to HubSpot:* {s.get('uploaded', 0)} (send_email_date = `{s.get('send_email_date', '?')}`)",
+              ]
+              hs = s.get("hubspot", {})
+              if hs:
+                  lines.append(f"*HubSpot result:* created={hs.get('created',0)} updated={hs.get('updated',0)} errors={hs.get('errors',0)}" + (" _(dry run)_" if hs.get("dry_run") else ""))
+              body_text = "\n".join(lines)
+          elif status == "ok":
+              emoji = ":white_check_mark:"
+              header = f"*Signup pipeline: nothing to do* (stage={s.get('stage')})"
+              body_text = f"Sheet total: {s.get('total_sheet',0):,}, new: {s.get('new',0)}"
+          else:
+              emoji = ":rotating_light:"
+              header = "*Signup pipeline FAILED*"
+              reason = s.get("reason", "(no summary file — pipeline crashed before writing it)")
+              stage = s.get("stage", "unknown")
+              body_text = f"*Stage:* `{stage}`\n*Reason:* {reason}"
+              counts_line = " | ".join(
+                  f"{k}={v}" for k, v in s.items()
+                  if k in ("total_sheet", "new", "enriched", "green", "yellow", "red")
+              )
+              if counts_line:
+                  body_text += f"\n*Counts so far:* {counts_line}"
+
+          body = {
+            "text": f"{emoji} {header}",
+            "blocks": [
+              {"type": "section", "text": {"type": "mrkdwn",
+                "text": f"{emoji} {header}\n<{run_url}|View run & download CSV/log>"}},
+              {"type": "section", "text": {"type": "mrkdwn", "text": body_text}},
+            ]
+          }
+          req = urllib.request.Request(
+            os.environ["SLACK_WEBHOOK"],
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+          print(urllib.request.urlopen(req).read().decode())
+          PY

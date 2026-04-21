@@ -1,0 +1,21 @@
+{
+  "status": "ok",
+  "timestamp": "2026-04-21T15:59:59.581648",
+  "stage": "done",
+  "dry_run": true,
+  "send_email_date": "21 Apr - Batch 1",
+  "uploaded": 553,
+  "hubspot": {
+    "created": 0,
+    "updated": 0,
+    "skipped": 0,
+    "errors": 0,
+    "dry_run": true
+  },
+  "total_sheet": 34229,
+  "new": 6642,
+  "enriched": 5589,
+  "green": 553,
+  "yellow": 0,
+  "red": 6089
+}

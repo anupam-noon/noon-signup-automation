@@ -42,6 +42,15 @@ def test_m2_short_both_is_yellow():
 def test_m2_normal_is_green():
     assert score_name_quality("Jane", "Doe") == "Green"
 
+def test_m2_at_in_name_is_red():
+    # Bot pasted email into last_name field
+    assert score_name_quality("OrbitLinkX41", "foo@bar.com") == "Red"
+    assert score_name_quality("foo@bar.com", "Doe") == "Red"
+
+def test_m2_digits_in_name_is_red():
+    assert score_name_quality("OrbitLinkX41", "Boost333") == "Red"
+    assert score_name_quality("Jane", "Doe99") == "Red"
+
 
 # ---- M3: IP / subnet ----
 def _ctx(rows):

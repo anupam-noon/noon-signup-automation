@@ -181,6 +181,9 @@ def score_name_quality(first_name: str, last_name: str) -> str:
 
     if not fn and not ln:
         return "Red"
+    # Bot tell: pasted the email into the last_name (or first_name) field.
+    if "@" in fn or "@" in ln:
+        return "Red"
     if fn_l and ln_l and fn_l == ln_l:
         return "Red"
     if fn and fn.replace(" ", "").isdigit():
@@ -195,13 +198,17 @@ def score_name_quality(first_name: str, last_name: str) -> str:
     if re.search(r"(.)\1{3,}", combined):
         return "Red"
 
+    # Bot tell: digits in names. Real people don't put numbers in their
+    # first/last name fields; bot form-fillers frequently do
+    # (e.g. "OrbitLinkX41", "Boost333", "CanyonXX059").
+    if fn and re.search(r"\d", fn):
+        return "Red"
+    if ln and re.search(r"\d", ln):
+        return "Red"
+
     fn_short = fn and len(fn.strip()) <= 2
     ln_short = ln and len(ln.strip()) <= 2
     if fn_short and ln_short:
-        return "Yellow"
-    if fn and re.search(r"\d", fn):
-        return "Yellow"
-    if ln and re.search(r"\d", ln):
         return "Yellow"
     return "Green"
 

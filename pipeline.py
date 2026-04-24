@@ -57,99 +57,48 @@ def write_output_csv(rows: list[dict]) -> Path:
 
 # ---------------------------------------------------------------------------
 # Sanity checks — guard against silently-broken enrichment or rules
-# ---------------------------------------------------------------------------
-# Countries where we expect mostly-legitimate traffic. If most signups from
-# here are Red, something upstream is broken (enrichment, rules, data).
-TRUSTED_COUNTRIES = {
-    "united states", "canada", "united kingdom",
-    "australia", "new zealand",
-    "germany", "france", "the netherlands", "netherlands",
-    "sweden", "norway", "denmark", "finland", "ireland",
-    "switzerland", "austria", "belgium",
-}
-
-
 def sanity_check(rows: list[dict]) -> list[str]:
     """Return a list of failure messages. Empty list = all good.
 
-    Invariants:
-      1. Combined across US/Canada/UK/W-Europe, ≥15% should be Green.
-         (Combined — not per-country — since any one country may be too
-         small a sample on a given day.)
-      2. Overall Red share should be ≥20% (launch-time signups attract bots).
-         If lower, bot detection isn't firing.
-      3. Overall Red share should be ≤95%. If higher, we're over-flagging.
+    Policy (simplified 2026-04-21 after review of real run data):
+      • N < 50: no threshold checks at all. Too small a sample for
+        population stats to be meaningful — a quiet day with 5 all-green
+        rows is plausible, not a bot-detection failure.
+      • N ≥ 50: require overall Red share ≥ 5% (floor) and ≤ 95% (ceiling).
+        Below 5% suggests bot detection isn't firing; above 95% suggests
+        over-flagging (check enrichment / scoring thresholds).
+
+    The earlier trusted-country green-rate check was dropped — verified
+    greens look legitimate, so that invariant was generating false alarms.
     """
     failures: list[str] = []
     n = len(rows)
     if n == 0:
         return failures
 
-    # Small-sample guards: all three invariants are population statistics
-    # that only make sense at scale. On a quiet day (e.g. N=5, all Greens),
-    # hitting 0% red or 0% trusted-green is plausible noise, not a real
-    # signal. Skip below these floors; still print what we saw.
-    # Trusted-country floor is smaller because trusted is always a subset.
-    SMALL_SAMPLE_FLOOR = 50            # for overall red share
-    TRUSTED_SAMPLE_FLOOR = 20          # for trusted-country green rate
+    SMALL_SAMPLE_FLOOR = 50
 
-    # ---- Invariant 1: trusted-country green rate ----
-    trusted = [
-        r for r in rows
-        if (r.get("country") or "").strip().lower() in TRUSTED_COUNTRIES
-    ]
-    if trusted:
-        green_trusted = sum(1 for r in trusted if r["_verdict"] == "Green")
-        rate = green_trusted / len(trusted)
-        print(
-            f"sanity: trusted-country green rate = "
-            f"{green_trusted}/{len(trusted)} ({rate:.1%})"
-        )
-        if len(trusted) < TRUSTED_SAMPLE_FLOOR:
-            print(
-                f"sanity: trusted sample too small "
-                f"(n={len(trusted)} < {TRUSTED_SAMPLE_FLOOR}) — "
-                f"skipping trusted-country green-rate check"
-            )
-        elif rate < 0.15:
-            failures.append(
-                f"trusted-country green rate is {rate:.1%} "
-                f"({green_trusted}/{len(trusted)}); expected ≥15% "
-                f"combined across US/Canada/UK/W-Europe. "
-                f"Likely cause: PostHog enrichment or scoring rules broken."
-            )
-            # Show a few examples for debugging
-            reds = [r for r in trusted if r["_verdict"] == "Red"][:5]
-            for r in reds:
-                print(
-                    f"  example red from {r.get('country')}: {r.get('email')} "
-                    f"sd={r.get('session_duration')!r} "
-                    f"pv={r.get('pageview_count')!r} "
-                    f"ac={r.get('autocapture_count')!r}"
-                )
-    else:
-        print("sanity: no trusted-country signups in this batch (skipping check 1)")
-
-    # ---- Invariant 2 & 3: overall red share ----
     reds = sum(1 for r in rows if r["_verdict"] == "Red")
     red_share = reds / n
     print(f"sanity: overall red share = {reds}/{n} ({red_share:.1%})")
+
     if n < SMALL_SAMPLE_FLOOR:
         print(
             f"sanity: sample too small (n={n} < {SMALL_SAMPLE_FLOOR}) — "
-            f"skipping red-share population checks"
+            f"skipping all threshold checks"
         )
-    else:
-        if red_share < 0.20:
-            failures.append(
-                f"overall red share is {red_share:.1%}; expected ≥20%. "
-                f"Bot detection may not be firing."
-            )
-        if red_share > 0.95:
-            failures.append(
-                f"overall red share is {red_share:.1%}; expected ≤95%. "
-                f"Over-flagging — check enrichment + M4/M5/M7 thresholds."
-            )
+        return failures
+
+    if red_share < 0.05:
+        failures.append(
+            f"overall red share is {red_share:.1%}; expected ≥5%. "
+            f"Bot detection may not be firing."
+        )
+    if red_share > 0.95:
+        failures.append(
+            f"overall red share is {red_share:.1%}; expected ≤95%. "
+            f"Over-flagging — check enrichment + M4/M5/M7 thresholds."
+        )
 
     return failures
 

@@ -290,16 +290,23 @@ def main() -> None:
     if cfg.dry_run:
         print("DRY_RUN: watermark NOT advanced")
     else:
-        # Mark all processed rows as seen EXCEPT the Greens/Yellows we
-        # deliberately skipped via LIMIT_UPLOAD — those should get a real
-        # shot at upload on the next run.
+        # Mark all processed rows as seen EXCEPT:
+        #   • Greens/Yellows we deliberately skipped via LIMIT_UPLOAD
+        #   • emails that errored on HubSpot upload (transient/unknown failures
+        #     — they get a real retry next run instead of being silently lost,
+        #     which was the 2026-04-24 bug).
+        # NOTE: rows dropped pre-flight as malformed (invalid_emails) DO get
+        # marked seen — they'll never be valid, so retrying just spams logs.
         capped_emails = {r["email"].lower() for r in capped_off}
+        errored_emails = {e.lower() for e in hubspot_result.get("errored_emails", [])}
+        held_back = capped_emails | errored_emails
         for r in new_rows:
-            if r["email"].lower() not in capped_emails:
+            if r["email"].lower() not in held_back:
                 seen.add(r["email"].lower())
         save_watermark(seen)
         print(f"watermark saved ({len(seen)} total seen emails; "
-              f"{len(capped_emails)} held back for next run)")
+              f"{len(capped_emails)} capped, {len(errored_emails)} errored "
+              f"— both held back for next run)")
 
     # ---- done ----
     write_summary(

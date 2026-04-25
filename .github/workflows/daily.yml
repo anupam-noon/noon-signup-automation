@@ -2,14 +2,10 @@ name: Daily signup pipeline
 
 on:
   schedule:
-    # 8 PM IST primary. GitHub can delay/skip scheduled runs at peak load,
-    # so we add 30-min and 60-min backup slots. Because the pipeline is
-    # watermark-driven, backup runs are idempotent: if the primary
-    # succeeded the backup sees 0 new rows and exits via the no_new_rows
-    # stage (fast, no HubSpot writes, no Slack spam).
-    - cron: "30 14 * * *"   # 8:00 PM IST (primary)
-    - cron: "00 15 * * *"   # 8:30 PM IST (backup 1)
-    - cron: "30 15 * * *"   # 9:00 PM IST (backup 2)
+    # 8 PM IST. Single slot — the watermark is now resilient to upload
+    # errors (errored emails are held back and retried by the next run),
+    # so we no longer need backup slots to paper over partial failures.
+    - cron: "30 14 * * *"   # 8:00 PM IST
   workflow_dispatch:
     inputs:
       dry_run:

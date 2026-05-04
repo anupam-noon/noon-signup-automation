@@ -1,16 +1,17 @@
 name: Email send check
 
-# Fires 30 min after the daily pipeline (which runs at 14:30 UTC = 8:00 PM IST).
-# Queries HubSpot to see how many of today's batch actually had their
-# confirmation email sent, and posts a single aggregated Slack message.
+# Fires at 11:45 PM IST — empirically all of today's HubSpot sends are
+# done by ~11:30 PM, so this gives a generous buffer over the 8:00 PM
+# pipeline cron + Multi Email Queue workflow runtime + GH Actions
+# scheduled-cron jitter (which can delay either job by 15-30 min).
 #
-# Decoupled from pipeline.py because the email send happens inside HubSpot's
-# Multi Email Queue workflow asynchronously — the cron is the cleanest way
-# to give it time without burning CI minutes on a sleep.
+# Decoupled from pipeline.py because the email send happens inside HubSpot
+# asynchronously after our pipeline exits. A late-night cron is simpler
+# and cheaper than chaining via workflow_run + sleep.
 
 on:
   schedule:
-    - cron: "0 15 * * *"   # 15:00 UTC = 8:30 PM IST  (30 min after pipeline)
+    - cron: "15 18 * * *"   # 18:15 UTC = 11:45 PM IST
   workflow_dispatch:
     inputs:
       batch_label:

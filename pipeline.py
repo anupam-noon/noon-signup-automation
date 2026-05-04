@@ -18,7 +18,7 @@ from pathlib import Path
 from config import cfg
 from sources.sheets import fetch_rows
 from sources.posthog import enrich_by_email
-from sinks.hubspot import upsert_contacts, today_batch_label
+from sinks.hubspot import upsert_contacts, today_batch_label, add_to_list
 from rules import build_ip_context, score_row
 
 STATE_PATH = Path(__file__).parent / "state" / "watermark.json"
@@ -286,6 +286,49 @@ def main() -> None:
             return
         print(f"hubspot: {hubspot_result}")
 
+    # ---- 6b. queue for email send (Multi Email Queue) ----
+    # If today's batch is small, auto-add to the static list that triggers
+    # the HubSpot email-send workflow. If it's large, hold for manual review
+    # — sending to 500+ people without a human eyeballing it is the kind of
+    # thing that ends careers. Threshold + list id come from env.
+    queue_status = {"action": "skipped", "reason": "no contacts uploaded", "count": 0}
+    uploaded_ids = hubspot_result.get("uploaded_ids", []) or []
+    if uploaded_ids and not cfg.dry_run:
+        n_uploaded = len(uploaded_ids)
+        threshold = cfg.email_queue_threshold
+        if not cfg.email_queue_list_id:
+            queue_status = {"action": "skipped", "reason": "HUBSPOT_QUEUE_LIST_ID not set",
+                            "count": n_uploaded}
+            print(f"queue: HUBSPOT_QUEUE_LIST_ID not set; skipping list-add "
+                  f"({n_uploaded} contacts uploaded but not queued)")
+        elif n_uploaded < threshold:
+            try:
+                res = add_to_list(cfg.email_queue_list_id, uploaded_ids)
+                queue_status = {"action": "auto_queued",
+                                "count": res.get("added", 0),
+                                "failed": res.get("failed", 0),
+                                "list_id": cfg.email_queue_list_id,
+                                "threshold": threshold,
+                                "batch_label": batch}
+                print(f"queue: auto-added {res.get('added', 0)}/{n_uploaded} "
+                      f"to Multi Email Queue (list {cfg.email_queue_list_id})")
+            except Exception as e:
+                queue_status = {"action": "error", "reason": str(e),
+                                "count": n_uploaded, "batch_label": batch}
+                print(f"queue: add-to-list failed: {e}")
+        else:
+            queue_status = {"action": "manual_review",
+                            "count": n_uploaded,
+                            "threshold": threshold,
+                            "list_id": cfg.email_queue_list_id,
+                            "batch_label": batch}
+            print(f"queue: ⚠️ {n_uploaded} >= {threshold} threshold — "
+                  f"NOT auto-queued. Manual review + add to list "
+                  f"{cfg.email_queue_list_id} required (filter by "
+                  f"send_email_date='{batch}').")
+    elif cfg.dry_run and uploaded_ids:
+        queue_status = {"action": "dry_run", "count": len(uploaded_ids)}
+
     # ---- 7. advance watermark (skip on dry run) ----
     if cfg.dry_run:
         print("DRY_RUN: watermark NOT advanced")
@@ -316,6 +359,7 @@ def main() -> None:
         send_email_date=batch,
         uploaded=len(actionable),
         hubspot=hubspot_result,
+        queue=queue_status,
         **counts,
     )
 

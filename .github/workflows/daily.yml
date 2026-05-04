@@ -57,6 +57,8 @@ jobs:
           POSTHOG_TOKEN:         ${{ secrets.POSTHOG_TOKEN }}
           POSTHOG_PROJECT_ID:    ${{ secrets.POSTHOG_PROJECT_ID }}
           HUBSPOT_TOKEN:         ${{ secrets.HUBSPOT_TOKEN }}
+          HUBSPOT_QUEUE_LIST_ID: ${{ vars.HUBSPOT_QUEUE_LIST_ID }}
+          EMAIL_QUEUE_THRESHOLD: ${{ vars.EMAIL_QUEUE_THRESHOLD || '500' }}
           DRY_RUN:               ${{ inputs.dry_run == 'true' && '1' || '' }}
           LIMIT_UPLOAD:          ${{ inputs.limit_upload || '0' }}
         run: python pipeline.py 2>&1 | tee pipeline.log
@@ -106,6 +108,22 @@ jobs:
               hs = s.get("hubspot", {})
               if hs:
                   lines.append(f"*HubSpot result:* created={hs.get('created',0)} updated={hs.get('updated',0)} errors={hs.get('errors',0)}" + (" _(dry run)_" if hs.get("dry_run") else ""))
+
+              # Email queue status — auto-queued / manual review / skipped
+              q = s.get("queue", {}) or {}
+              qa = q.get("action")
+              if qa == "auto_queued":
+                  lines.append(f":mailbox_with_mail: *Email queue:* auto-added {q.get('count',0)} contacts to Multi Email Queue (list `{q.get('list_id','?')}`) — workflow should fire shortly")
+              elif qa == "manual_review":
+                  lines.append(f":warning: *Email queue:* {q.get('count',0)} contacts uploaded — *NOT* auto-queued (>= {q.get('threshold',500)} threshold). Filter HubSpot by `send_email_date = \"{q.get('batch_label','?')}\"` and add to Multi Email Queue manually.")
+              elif qa == "error":
+                  lines.append(f":x: *Email queue:* add-to-list failed — {q.get('reason','?')}. {q.get('count',0)} contacts uploaded but not queued.")
+              elif qa == "skipped":
+                  if q.get("reason") and "not set" in q.get("reason", ""):
+                      lines.append(f":grey_question: *Email queue:* skipped — `HUBSPOT_QUEUE_LIST_ID` not configured.")
+              elif qa == "dry_run":
+                  lines.append(f"_(queue: dry run, would have queued {q.get('count',0)})_")
+
               body_text = "\n".join(lines)
           elif status == "ok":
               # Stay silent on no-op runs from the backup cron slots.

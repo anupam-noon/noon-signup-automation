@@ -16,6 +16,8 @@ class Config:
     hubspot_token: str
     dry_run: bool
     limit_upload: int  # 0 = no limit
+    email_queue_list_id: str   # HubSpot list ID for "Multi Email Queue"; empty disables auto-queue
+    email_queue_threshold: int # batches strictly below this auto-queue; at/above → manual review
 
 
 def _require(name: str) -> str:
@@ -34,4 +36,6 @@ cfg = Config(
     hubspot_token=_require("HUBSPOT_TOKEN"),
     dry_run=os.getenv("DRY_RUN", "") in ("1", "true", "True", "yes"),
     limit_upload=int(os.getenv("LIMIT_UPLOAD", "0") or "0"),
+    email_queue_list_id=os.getenv("HUBSPOT_QUEUE_LIST_ID", "").strip(),
+    email_queue_threshold=int(os.getenv("EMAIL_QUEUE_THRESHOLD", "500") or "500"),
 )

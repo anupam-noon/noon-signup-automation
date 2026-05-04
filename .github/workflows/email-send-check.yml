@@ -1,0 +1,120 @@
+name: Email send check
+
+# Fires at 11:45 PM IST — empirically all of today's HubSpot sends are
+# done by ~11:30 PM, so this gives a generous buffer over the 8:00 PM
+# pipeline cron + Multi Email Queue workflow runtime + GH Actions
+# scheduled-cron jitter (which can delay either job by 15-30 min).
+#
+# Decoupled from pipeline.py because the email send happens inside HubSpot
+# asynchronously after our pipeline exits. A late-night cron is simpler
+# and cheaper than chaining via workflow_run + sleep.
+
+on:
+  schedule:
+    - cron: "15 18 * * *"   # 18:15 UTC = 11:45 PM IST
+  workflow_dispatch:
+    inputs:
+      batch_label:
+        description: "Override batch label (e.g. '04 May - Batch 1'). Leave blank for today."
+        required: false
+        default: ""
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run send check
+        env:
+          HUBSPOT_TOKEN:        ${{ secrets.HUBSPOT_TOKEN }}
+          BATCH_LABEL_OVERRIDE: ${{ inputs.batch_label }}
+        run: python check_email_sends.py
+
+      - name: Slack notify
+        if: always()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request, pathlib
+
+          run_url = os.environ["RUN_URL"]
+          job_status = os.environ["JOB_STATUS"]
+
+          p = pathlib.Path("send_check_summary.json")
+          if not p.exists():
+              # Script crashed before writing summary — silent on schedule, loud on dispatch
+              if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+                  print("no summary file; staying silent on schedule")
+                  raise SystemExit(0)
+              body_text = "Email send check ran but produced no summary file."
+              header = "*Email send check — unknown state*"
+              emoji = ":warning:"
+          else:
+              s = json.loads(p.read_text())
+              status = s.get("status", "error")
+              label = s.get("batch_label", "?")
+
+              if status == "error":
+                  emoji = ":x:"
+                  header = f"*Email send check FAILED* — batch `{label}`"
+                  body_text = f"*Reason:* {s.get('reason','(none)')}"
+
+              else:
+                  total = s.get("total", 0)
+                  sent = s.get("sent", 0)
+                  pending = s.get("pending", 0)
+
+                  if total == 0:
+                      # No contacts found — could be a no-op day, or large-batch
+                      # manual-review path. Silent on schedule.
+                      if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+                          print(f"no contacts found for batch '{label}'; staying silent")
+                          raise SystemExit(0)
+                      emoji = ":mag:"
+                      header = f"*Email send check* — no contacts for batch `{label}`"
+                      body_text = "Likely either a no-op day, or the batch was held for manual review (>=500 threshold)."
+                  elif pending == 0:
+                      emoji = ":white_check_mark:"
+                      header = f"*Emails sent* — batch `{label}`"
+                      body_text = f"*Sent:* {sent} / {total} (100%)"
+                  else:
+                      emoji = ":warning:"
+                      header = f"*Emails partially sent* — batch `{label}`"
+                      pct = 100 * sent / total if total else 0
+                      body_text = (f"*Sent:* {sent} / {total} ({pct:.0f}%)\n"
+                                   f"*Pending:* {pending} — check the HubSpot workflow for failures, "
+                                   f"unsubscribes, or contacts still being processed.")
+
+          body = {
+              "text": f"{emoji} {header}",
+              "blocks": [
+                  {"type": "section", "text": {"type": "mrkdwn",
+                       "text": f"{emoji} {header}\n<{run_url}|View run>"}},
+                  {"type": "section", "text": {"type": "mrkdwn", "text": body_text}},
+              ]
+          }
+          req = urllib.request.Request(
+              os.environ["SLACK_WEBHOOK"],
+              data=json.dumps(body).encode(),
+              headers={"Content-Type": "application/json"})
+          print(urllib.request.urlopen(req).read().decode())
+          PY
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: email-send-check-${{ github.run_id }}
+          path: send_check_summary.json
+          retention-days: 30

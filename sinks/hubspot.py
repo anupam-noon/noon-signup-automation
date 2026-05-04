@@ -82,12 +82,15 @@ def _request_with_retry(method: str, url: str, **kw):
     return r  # exhausted retries; caller inspects status
 
 
-def _upsert_one(contact: dict) -> tuple[bool, str]:
+def _upsert_one(contact: dict) -> tuple[bool, str, str]:
     """PATCH the contact; on 404 (doesn't exist yet), POST to create.
 
     PATCH-only was the bug behind the 2026-04-24 incident: when a batch
     failed and we fell back to per-contact, every new contact 404'd
     because PATCH only updates existing rows.
+
+    Returns (ok, detail, record_id). record_id is HubSpot's internal id
+    when ok; "" otherwise. We need the id to feed into list-membership APIs.
     """
     email = contact["email"]
     props = _props(contact)
@@ -96,26 +99,29 @@ def _upsert_one(contact: dict) -> tuple[bool, str]:
     patch_url = f"{BASE}/crm/v3/objects/contacts/{email}?idProperty=email"
     r = _request_with_retry("PATCH", patch_url, json={"properties": props})
     if r.status_code < 300:
-        return True, ""
+        return True, "", str(r.json().get("id", ""))
     if r.status_code != 404:
-        return False, f"PATCH {r.status_code} {r.text[:200]}"
+        return False, f"PATCH {r.status_code} {r.text[:200]}", ""
 
     # Doesn't exist — create it. Email goes in properties for POST.
     create_url = f"{BASE}/crm/v3/objects/contacts"
     r = _request_with_retry("POST", create_url,
                              json={"properties": {**props, "email": email}})
     if r.status_code < 300:
-        return True, ""
-    return False, f"POST {r.status_code} {r.text[:200]}"
+        return True, "", str(r.json().get("id", ""))
+    return False, f"POST {r.status_code} {r.text[:200]}", ""
 
 
-def _upsert_batch(chunk: list[dict]) -> tuple[int, list[dict]]:
-    """Try the batch endpoint. Returns (n_ok, failed_chunk_for_fallback).
+def _upsert_batch(chunk: list[dict]) -> tuple[list[str], list[dict]]:
+    """Try the batch endpoint. Returns (ok_record_ids, failed_chunk_for_fallback).
 
-    On batch-level success: (len(chunk), []).
-    On any non-transient batch failure: (0, chunk) — caller should retry
+    On batch-level success: ([id, id, ...], []).
+    On any non-transient batch failure: ([], chunk) — caller should retry
     each contact individually so one bad record doesn't sink the rest.
-    On exhausted-retry transient failure: (0, chunk) — same fallback path.
+    On exhausted-retry transient failure: ([], chunk) — same fallback path.
+
+    We collect HubSpot record ids (not just a count) because downstream
+    we may add the freshly-uploaded contacts to a list, which needs ids.
     """
     url = f"{BASE}/crm/v3/objects/contacts/batch/upsert"
     body = {
@@ -126,11 +132,12 @@ def _upsert_batch(chunk: list[dict]) -> tuple[int, list[dict]]:
     }
     r = _request_with_retry("POST", url, json=body)
     if r.status_code < 300:
-        return len(r.json().get("results", [])), []
+        return [str(rec.get("id", "")) for rec in r.json().get("results", [])
+                if rec.get("id")], []
     # Batch failed — hand off to per-contact fallback.
     print(f"  batch of {len(chunk)} failed ({r.status_code} {r.text[:200]}); "
           f"falling back to per-contact")
-    return 0, chunk
+    return [], chunk
 
 
 def upsert_contacts(contacts: list[dict]) -> dict:
@@ -155,7 +162,7 @@ def upsert_contacts(contacts: list[dict]) -> dict:
         for c in contacts[:3]:
             print("   sample:", c)
         return {"created": 0, "updated": 0, "skipped": 0, "errors": 0,
-                "dry_run": True, "errored_emails": []}
+                "dry_run": True, "errored_emails": [], "uploaded_ids": []}
 
     # 1. Pre-validate. Drop obvious malformed emails before they poison a batch.
     valid: list[dict] = []
@@ -179,19 +186,23 @@ def upsert_contacts(contacts: list[dict]) -> dict:
     created = errors = 0
     fallback_used = 0
     errored_emails: list[str] = []  # caller holds these back from the watermark
+    uploaded_ids: list[str] = []    # HubSpot record ids of successful upserts
 
     for i in range(0, len(deduped), BATCH_SIZE):
         chunk = deduped[i : i + BATCH_SIZE]
-        ok, failed = _upsert_batch(chunk)
-        created += ok
+        ok_ids, failed = _upsert_batch(chunk)
+        created += len(ok_ids)
+        uploaded_ids.extend(ok_ids)
 
         # Per-contact fallback (PATCH then POST-on-404) for the records in a
         # failed batch. So one bad row no longer sinks 99 good ones.
         for c in failed:
             fallback_used += 1
-            ok_one, detail = _upsert_one(c)
+            ok_one, detail, rec_id = _upsert_one(c)
             if ok_one:
                 created += 1
+                if rec_id:
+                    uploaded_ids.append(rec_id)
             else:
                 errors += 1
                 errored_emails.append(c["email"])
@@ -209,7 +220,39 @@ def upsert_contacts(contacts: list[dict]) -> dict:
         "fallback_used": fallback_used,
         "invalid_emails": invalid_emails,   # malformed; never retry
         "errored_emails": errored_emails,   # transient/unknown; safe to retry next run
+        "uploaded_ids": uploaded_ids,       # for downstream list-add (Multi Email Queue)
     }
+
+
+def add_to_list(list_id: str, record_ids: list[str]) -> dict:
+    """Add HubSpot contact record ids to a static list (e.g. Multi Email Queue).
+
+    Uses the new Lists API: PUT /crm/v3/lists/{listId}/memberships/add
+    Body is a JSON array of record id strings (max 100 per call).
+
+    The downstream HubSpot Workflow watches this list and triggers email send.
+    Idempotent: if a contact is already in the list, HubSpot returns success.
+    """
+    if not record_ids:
+        return {"added": 0, "list_id": list_id, "skipped_empty": True}
+    if not list_id:
+        return {"added": 0, "list_id": "", "skipped_no_list_id": True}
+    if cfg.dry_run:
+        print(f"[DRY_RUN] would add {len(record_ids)} contacts to list {list_id}")
+        return {"added": 0, "list_id": list_id, "dry_run": True}
+
+    url = f"{BASE}/crm/v3/lists/{list_id}/memberships/add"
+    added = 0
+    failed = 0
+    for i in range(0, len(record_ids), 100):
+        chunk = record_ids[i : i + 100]
+        r = _request_with_retry("PUT", url, json=chunk)
+        if r.status_code < 300:
+            added += len(chunk)
+        else:
+            failed += len(chunk)
+            print(f"  list-add chunk failed: {r.status_code} {r.text[:200]}")
+    return {"added": added, "failed": failed, "list_id": list_id}
 
 
 def fetch_existing_emails() -> set[str]:
